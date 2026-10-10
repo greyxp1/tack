@@ -369,6 +369,14 @@ upstream to the patched tree, with `git apply` from your `nixpkgs` pin (or
 link keeps the tree from being garbage collected, so you only need to run it
 again after pulling a lock with new patches.
 
+the same command builds the patched pins of any tack project you pin, at any
+depth, since their trees only ever existed on that project's machines. it
+reads their locks and generated diffs as data and never runs their resolvers,
+and skips with a warning any tree whose lock predates generated diffs or whose
+diff is missing. a pinned project whose pins don't parse or can't be fetched
+still stops the whole build, so build your own trees with `-A _patched.<pin>`
+until that project is fixed.
+
 hunks may sit at a different line than the patch says, and hand-edited hunk
 counts are recounted the way GNU patch does, but context lines must match
 exactly, since its fuzz isn't supported. binary, symlink, and submodule changes
@@ -472,8 +480,8 @@ downstream project replaces through follows takes that project's entry, or
 
 a `fetch` pin that overrides or policy reach carries the upstream project's own
 `_meta` as `inputs.<pin>._meta`. upstream resolvers older than this have none,
-so read those through `inputs.<pin>._meta or { }`. `_meta` and `_patched` can't
-be used as pin names.
+so read those through `inputs.<pin>._meta or { }`. `_meta`, `_patched` and
+`_nested` can't be used as pin names.
 
 ## publishing
 

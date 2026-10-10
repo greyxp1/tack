@@ -16,18 +16,22 @@ let
     filter
     foldl'
     fromJSON
+    genericClosure
     hashFile
     head
     intersectAttrs
     isAttrs
     isList
     isString
+    length
     listToAttrs
     mapAttrs
     match
     pathExists
     readFile
+    readFileType
     removeAttrs
+    replaceStrings
     split
     stringLength
     substring
@@ -115,9 +119,10 @@ let
           any (reserved: pins.inputs or { } ? ${reserved}) [
             "_meta"
             "_patched"
+            "_nested"
           ]
         then
-          throw "tack: '_meta' and '_patched' are reserved by tack, rename that input"
+          throw "tack: '_meta', '_patched' and '_nested' are reserved by tack, rename that input"
         else
           pins.inputs or { };
       all_follow_raw = pins.all_follow or { };
@@ -187,45 +192,56 @@ let
 
       # path nodes are convenience pins, so return the live local path directly
       # because fetchTree rejects unlocked paths in pure eval
+      fetchNode =
+        {
+          dir,
+          name,
+          node,
+        }:
+        let
+          type = node.type or "";
+        in
+        if type == "path" then
+          {
+            outPath = if substring 0 1 node.path == "/" then node.path else dir + ("/" + node.path);
+            lastModified = node.lastModified or 0;
+          }
+          // (if node ? narHash then { inherit (node) narHash; } else { })
+        # a cold fetcher cache makes fetchTree re-unpack a locked tarball into the
+        # git cache even when its store path exists, fetchTarball checks the store first
+        else if type == "tarball" && node ? narHash && node ? lastModified then
+          {
+            outPath = fetchTarball {
+              inherit (node) url;
+              sha256 = node.narHash;
+            };
+            inherit (node) narHash lastModified;
+            lastModifiedDate = formatEpoch node.lastModified;
+          }
+          // (
+            if node ? rev then
+              {
+                inherit (node) rev;
+                shortRev = substring 0 7 node.rev;
+              }
+            else
+              { }
+          )
+        else if !(elem type knownTypes) then
+          throw "tack: unknown lock type '${type}' for pin '${name}'"
+        else
+          fetchTree (intersectAttrs fetchTreeAttrs node);
+
       fetchPin =
         name:
         if !(lock ? ${name}) then
           throw "tack: pin '${name}' has no lock entry; run tack update"
         else
-          let
+          fetchNode {
+            dir = resolverDir;
+            inherit name;
             node = lock.${name};
-            type = node.type or "";
-          in
-          if type == "path" then
-            {
-              outPath = if substring 0 1 node.path == "/" then node.path else resolverDir + ("/" + node.path);
-              lastModified = node.lastModified or 0;
-            }
-            // (if node ? narHash then { inherit (node) narHash; } else { })
-          # a cold fetcher cache makes fetchTree re-unpack a locked tarball into the
-          # git cache even when its store path exists, fetchTarball checks the store first
-          else if type == "tarball" && node ? narHash && node ? lastModified then
-            {
-              outPath = fetchTarball {
-                inherit (node) url;
-                sha256 = node.narHash;
-              };
-              inherit (node) narHash lastModified;
-              lastModifiedDate = formatEpoch node.lastModified;
-            }
-            // (
-              if node ? rev then
-                {
-                  inherit (node) rev;
-                  shortRev = substring 0 7 node.rev;
-                }
-              else
-                { }
-            )
-          else if !(elem type knownTypes) then
-            throw "tack: unknown lock type '${type}' for pin '${name}'"
-          else
-            fetchTree (intersectAttrs fetchTreeAttrs node);
+          };
 
       fetchFixed =
         { name, entry }:
@@ -322,6 +338,152 @@ let
             pin = declared.${name};
           };
         }) (filter (name: (declared.${name}.patches or [ ]) != [ ]) (attrNames declared))
+      );
+
+      # pinned projects are read as data, never imported, since their resolvers
+      # are upstream code
+      plainName = name: isString name && match "[A-Za-z0-9_+-][A-Za-z0-9._+-]*" name != null;
+      plainDir =
+        dir:
+        isString dir
+        && match "[A-Za-z0-9_+-][A-Za-z0-9._+-]*(/[A-Za-z0-9_+-][A-Za-z0-9._+-]*)*" dir != null;
+      sriHash = hash: isString hash && match "sha256-[A-Za-z0-9+/]{43}=" hash != null;
+      fetchedNode =
+        node:
+        isAttrs node
+        && sriHash (node.narHash or null)
+        && elem (node.type or "") [
+          "github"
+          "gitlab"
+          "git"
+          "tarball"
+        ];
+      isType = type: path: pathExists path && readFileType path == type;
+
+      tackProjectAt =
+        root:
+        let
+          dir = root + "/.tack";
+          pinsFile = fromTOML (readFile (dir + "/pins.toml"));
+          lockFile = fromJSON (readFile (dir + "/pins.lock.json"));
+          inputs = if isAttrs (pinsFile.inputs or null) then pinsFile.inputs else { };
+        in
+        if
+          !isType "directory" dir
+          || !isType "regular" (dir + "/pins.toml")
+          || !isType "regular" (dir + "/pins.lock.json")
+        then
+          null
+        else
+          {
+            inherit dir inputs;
+            lock = if isAttrs lockFile then intersectAttrs inputs lockFile else { };
+          };
+
+      lockedPatch =
+        project: name:
+        let
+          node = project.lock.${name};
+          tree = node.patched;
+          diff = project.dir + "/diffs/${name}.diff";
+        in
+        if !plainName name || !isAttrs (node.patched or null) then
+          { skip = null; }
+        else if !fetchedNode node || !sriHash (tree.narHash or null) then
+          { skip = "its lock entry isn't a locked fetch"; }
+        else if !isString (tree.diff or null) then
+          { skip = "its lock predates generated diffs"; }
+        else if !isType "regular" diff || hashFile "sha256" diff != tree.diff then
+          { skip = "diffs/${name}.diff is missing or doesn't match its lock"; }
+        else
+          {
+            inherit diff;
+            inherit (tree) narHash;
+            drv = patchDerivation {
+              upstream = fetchNode {
+                inherit (project) dir;
+                inherit name node;
+              };
+              inherit diff;
+              inherit (tree) narHash;
+            };
+          };
+
+      pinnedProjects =
+        project:
+        concatMap (
+          name:
+          let
+            pin = project.inputs.${name};
+            node = project.lock.${name} or null;
+            subdir = if pin ? dir then "/" + pin.dir else "";
+            patch = lockedPatch project name;
+            tackHeader = "\ndiff --git \"?a/${
+              replaceStrings [ "." "+" ] [ "\\." "\\+" ] (if pin ? dir then pin.dir + "/" else "")
+            }\\.tack/";
+            # a patch that rewrites the pinned project's own .tack changes what
+            # it pins, so walk the patched tree, which nix has to build first
+            patchesTack = patch ? drv && length (split tackHeader ("\n" + readFile patch.diff)) > 1;
+            source =
+              if patchesTack then
+                patch.drv
+              else
+                fetchNode {
+                  inherit (project) dir;
+                  inherit name node;
+                };
+            root = source.outPath + subdir;
+          in
+          if
+            !plainName name
+            || !isAttrs pin
+            || (pin.type or "") == "fixed"
+            || pin ? dir && !plainDir pin.dir
+            || !fetchedNode node
+          then
+            [ ]
+          else
+            [
+              {
+                key = (if patchesTack then patch.narHash else node.narHash) + subdir;
+                project = if isType "directory" root then tackProjectAt root else null;
+              }
+            ]
+        ) (attrNames project.inputs);
+
+      nestedProjects = genericClosure {
+        startSet = pinnedProjects {
+          dir = resolverDir;
+          inputs = declared;
+          inherit lock;
+        };
+        operator = item: if item.project == null then [ ] else pinnedProjects item.project;
+      };
+
+      nestedPatched = listToAttrs (
+        concatMap (
+          item:
+          let
+            inherit (item) project;
+            build =
+              name:
+              let
+                patch = lockedPatch project name;
+              in
+              if patch ? drv then
+                [
+                  {
+                    name = "${name}-${substring 7 12 patch.narHash}";
+                    value = patch.drv;
+                  }
+                ]
+              else if patch.skip == null then
+                [ ]
+              else
+                trace "tack: skipping patched pin '${name}' of ${project.dir}, ${patch.skip}" [ ];
+          in
+          if project == null then [ ] else concatMap build (attrNames project.lock)
+        ) nestedProjects
       );
 
       buildPatched =
@@ -1128,7 +1290,11 @@ let
           self
           // {
             _meta = selfMeta;
-            _patched = ownPatched;
+            _patched = ownPatched // {
+              _nested = nestedPatched // {
+                recurseForDerivations = true;
+              };
+            };
             __functor = _: { ... }@args: call ({ inherit resolverDir; } // args);
           }
         )
