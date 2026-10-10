@@ -365,7 +365,7 @@ fn run_credentials<T>(
     if !allow_anon {
         return Err(token_failure.unwrap_or_else(|| {
             FetchError::Auth {
-                what: format!("{host}: no usable credentials"),
+                what: format!("no {host} token"),
             }
         }));
     }

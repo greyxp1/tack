@@ -244,15 +244,6 @@ impl HttpClient {
         V: Serialize,
         T: DeserializeOwned,
     {
-        if token_for_host("github.com").is_none() {
-            record_fetch_warning(
-                "no GitHub token; rev comparison falls back to commit lookup plus git DAG compare \
-                 (set GITHUB_TOKEN or GH_TOKEN, or opt into nix.conf access-tokens with \
-                 TACK_NIX_CONF_TOKENS=1)"
-                    .to_owned(),
-            );
-        }
-
         let payload = serde_json::to_string(&GraphqlRequest { query, variables })
             .map_err(|err| FetchError::Github(format!("serialize graphql request: {err}")))?;
 
