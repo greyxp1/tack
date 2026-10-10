@@ -616,6 +616,9 @@ fn settle_patches(
             // saying
             let rebuilt = match settled {
                 Settled::Rehashed(_) => Some("its tree no longer matched the lock's hash"),
+                Settled::Rediffed(_) => {
+                    Some("its generated diff was missing, edited, or unrecorded")
+                },
                 Settled::Rebuilt(_) if !moved => Some("its patches changed"),
                 Settled::Current | Settled::Restored | Settled::Rebuilt(_) | Settled::Unpatched => {
                     None

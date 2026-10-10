@@ -280,6 +280,10 @@ pub struct PatchedTree {
     #[serde(rename = "lastModified", skip_serializing_if = "Option::is_none")]
     pub last_modified: Option<u64>,
     pub patches:       Vec<PatchDigest>,
+    /// sha256 of the diff tack generates from upstream to this tree, which nix
+    /// applies to rebuild it where tack isn't installed
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diff:          Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
