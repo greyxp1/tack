@@ -53,6 +53,7 @@ pub fn add(project: &Project, args: &AddArgs) -> Result<()> {
     if unpack.is_some() && pin_type != PinType::Fixed {
         user_bail!("--unpack is only valid with --fixed");
     }
+    pins::check_name(name)?;
     let mut doc = project.load_pins()?;
     if doc.has_input(name) {
         user_bail!("input '{name}' already exists");
